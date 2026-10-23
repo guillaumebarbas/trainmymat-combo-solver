@@ -4,7 +4,9 @@ Ce service (génération de graphes et simulation interactive de combos) est un 
 distribué sous **GNU Affero General Public License v3** (voir `LICENSE`). Il charge à l'exécution le
 moteur de règles et les scripts de cartes ci-dessous, eux-mêmes sous AGPL : toute personne qui utilise
 ce service à travers le réseau, y compris via l'application TrainMyMat, peut en obtenir le code source
-complet, modifications comprises, pour la version qu'elle utilise (`GET /version` donne les commits).
+complet, modifications comprises, pour la version qu'elle utilise : il est publié sur
+<https://github.com/guillaumebarbas/trainmymat-combo-solver>, et `GET /version` donne le commit déployé
+(`service`) ainsi que ceux du moteur et des données.
 
 L'application et le backend TrainMyMat sont des programmes distincts qui dialoguent avec ce service
 uniquement par HTTP/JSON ; ils ne sont pas couverts par cette notice.

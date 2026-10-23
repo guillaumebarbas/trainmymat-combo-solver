@@ -23,6 +23,7 @@ logger = logging.getLogger("combo-solver")
 
 app = FastAPI(title="TrainMyMat Combo Solver")
 TOKEN = os.environ.get("COMBO_SOLVER_TOKEN", "")
+SOURCE = "https://github.com/guillaumebarbas/trainmymat-combo-solver"
 _engine: Engine | None = None
 # Le moteur et ses callbacks ctypes ne sont pas prévus pour un usage concurrent : un moteur par processus
 # (plusieurs workers uvicorn pour servir en parallèle).
@@ -83,10 +84,14 @@ def verifier_jeton(jeton: str):
 
 
 def versions() -> dict:
-    """Commits du moteur et des données (écrits par build_core.sh), à stocker avec chaque replay."""
+    """Commits du moteur et des données (écrits par build_core.sh), à stocker avec chaque replay.
+
+    `source` + `service` forment l'offre de code source AGPL affichée par l'application : un fork déployé
+    doit faire pointer `SOURCE` vers son propre dépôt.
+    """
     fichier = VENDOR / "versions.json"
     epinglees = json.loads(fichier.read_text()) if fichier.is_file() else {}
-    return {**epinglees, "service": os.environ.get("COMBO_SOLVER_VERSION", "dev")}
+    return {**epinglees, "service": os.environ.get("COMBO_SOLVER_VERSION", "dev"), "source": SOURCE}
 
 
 @app.get("/health")

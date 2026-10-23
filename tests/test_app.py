@@ -54,6 +54,15 @@ def test_simulation_borne_et_valide_ses_entrees(client, champ, valeur):
     assert reponse.status_code == 422
 
 
+def test_version_indique_le_depot_public_et_le_commit_deploye(client, monkeypatch):
+    monkeypatch.setenv("COMBO_SOLVER_VERSION", "8e2a04fc")
+
+    versions = client.get("/version").json()
+
+    assert versions["source"] == "https://github.com/guillaumebarbas/trainmymat-combo-solver"
+    assert versions["service"] == "8e2a04fc"
+
+
 @pytest.mark.skipif(not MOTEUR_DISPONIBLE, reason="Moteur non construit : lancer ./build_core.sh")
 def test_simulation_renvoie_la_decision_courante_et_les_versions(client):
     reponse = client.post("/simulation/etat", json={**HERO, "choix": [{"indices": [0]}]}, headers=JETON)

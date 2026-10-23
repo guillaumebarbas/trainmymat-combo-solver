@@ -38,6 +38,18 @@ Deux usages :
   pas retirer ces plafonds.
 - Le jeton `COMBO_SOLVER_TOKEN` est obligatoire : sans lui, le service répond 503.
 - Ne jamais journaliser de jeton ni de donnée utilisateur (deck, main, choix).
+- Le dossier est publié tel quel dans le dépôt public `guillaumebarbas/trainmymat-combo-solver` : n'y mettre ni
+  secret ni donnée privée. `SOURCE` (`app.py`) et `GET /version` forment l'offre de source AGPL affichée par le
+  simulateur ; publier chaque version déployée.
+
+## Publication
+
+Depuis la racine du workspace, après commit :
+
+```bash
+git subtree split --prefix=combo-solver-service -b combo-solver-public
+git push https://github.com/guillaumebarbas/trainmymat-combo-solver.git combo-solver-public:main
+```
 
 ## Validation
 
