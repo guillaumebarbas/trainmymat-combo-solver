@@ -63,6 +63,14 @@ def test_version_indique_le_depot_public_et_le_commit_deploye(client, monkeypatc
     assert versions["service"] == "8e2a04fc"
 
 
+def test_version_reprend_le_commit_que_la_plateforme_de_deploiement_injecte(client, monkeypatch):
+    # Image construite sans argument COMBO_SOLVER_VERSION ; Coolify fournit SOURCE_COMMIT au démarrage.
+    monkeypatch.setenv("COMBO_SOLVER_VERSION", "")
+    monkeypatch.setenv("SOURCE_COMMIT", "5c9199cf061ea8c43f69e7bfaf9674c5947835ab")
+
+    assert client.get("/version").json()["service"] == "5c9199cf061ea8c43f69e7bfaf9674c5947835ab"
+
+
 @pytest.mark.skipif(not MOTEUR_DISPONIBLE, reason="Moteur non construit : lancer ./build_core.sh")
 def test_simulation_renvoie_la_decision_courante_et_les_versions(client):
     reponse = client.post("/simulation/etat", json={**HERO, "choix": [{"indices": [0]}]}, headers=JETON)

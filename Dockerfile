@@ -16,8 +16,9 @@ RUN ./build_core.sh \
 COPY solver ./solver
 COPY app.py LICENSE NOTICE.md ./
 
-# Commit du service déployé, exposé par GET /version (offre de source AGPL).
-ARG COMBO_SOLVER_VERSION=dev
+# Commit du service déployé, exposé par GET /version (offre de source AGPL). Vide : app.py reprend SOURCE_COMMIT,
+# que Coolify injecte au démarrage, sinon « dev ».
+ARG COMBO_SOLVER_VERSION=""
 ENV COMBO_SOLVER_VERSION=${COMBO_SOLVER_VERSION}
 
 EXPOSE 8002

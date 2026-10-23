@@ -52,7 +52,7 @@ curl -s localhost:8002/simulation/etat -H 'content-type: application/json' -H 'X
 |---|---|
 | `COMBO_SOLVER_TOKEN` | Obligatoire : jeton attendu dans l'en-tête `X-Solver-Token`. Sans lui, le service répond 503. |
 | `COMBO_SOLVER_WORKERS` | Nombre de processus uvicorn, un moteur chacun (2 par défaut). |
-| `COMBO_SOLVER_VERSION` | Commit déployé, renvoyé par `GET /version` (argument de build Docker). |
+| `COMBO_SOLVER_VERSION` | Commit déployé, renvoyé par `GET /version` (argument de build Docker) ; à défaut `SOURCE_COMMIT` (injecté au démarrage par Coolify), sinon `dev`. |
 
 Le service n'a pas vocation à être exposé sur Internet : seul le backend TrainMyMat l'appelle, avec le jeton.
 

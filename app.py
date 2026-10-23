@@ -87,11 +87,13 @@ def versions() -> dict:
     """Commits du moteur et des données (écrits par build_core.sh), à stocker avec chaque replay.
 
     `source` + `service` forment l'offre de code source AGPL affichée par l'application : un fork déployé
-    doit faire pointer `SOURCE` vers son propre dépôt.
+    doit faire pointer `SOURCE` vers son propre dépôt. Sans COMBO_SOLVER_VERSION au build, le commit vient de
+    SOURCE_COMMIT, injecté au démarrage par Coolify.
     """
     fichier = VENDOR / "versions.json"
     epinglees = json.loads(fichier.read_text()) if fichier.is_file() else {}
-    return {**epinglees, "service": os.environ.get("COMBO_SOLVER_VERSION", "dev"), "source": SOURCE}
+    service = os.environ.get("COMBO_SOLVER_VERSION") or os.environ.get("SOURCE_COMMIT") or "dev"
+    return {**epinglees, "service": service, "source": SOURCE}
 
 
 @app.get("/health")
