@@ -298,12 +298,13 @@ class Engine:
         return self.lib.OCG_LoadScript(duel, contenu, len(contenu), nom)
 
     def creer_duel(self, seed: int = 1, *, graines: tuple[int, int, int, int] | None = None,
-                   flags: int = DUEL_MODE_MR5 | DUEL_PSEUDO_SHUFFLE) -> "Duel":
+                   flags: int = DUEL_MODE_MR5 | DUEL_PSEUDO_SHUFFLE, pioches: tuple[int, int] = (1, 1)) -> "Duel":
+        """`pioches` : cartes piochées par chaque joueur au début de son tour (0 : il ne pioche pas)."""
         options = OCGDuelOptions()
         options.seed[:] = list(graines) if graines else [seed, seed * 3 + 1, seed * 7 + 2, seed * 11 + 3]
         options.flags = flags
-        for equipe in (options.team1, options.team2):
-            equipe.startingLP, equipe.startingDrawCount, equipe.drawCountPerTurn = 8000, 0, 1
+        for equipe, pioche in zip((options.team1, options.team2), pioches):
+            equipe.startingLP, equipe.startingDrawCount, equipe.drawCountPerTurn = 8000, 0, pioche
         options.cardReader = self._lecteur_cartes
         options.scriptReader = self._lecteur_scripts
         options.logHandler = self._journal
@@ -456,7 +457,8 @@ def lire_terrain(brut: bytes) -> dict:
     lecteur.lire("I")  # options du duel
     joueurs = []
     for _ in range(2):
-        joueur = {"lp": lecteur.lire("I")}
+        # Le moteur garde des LP signés, qui passent sous 0 au coup fatal : le duel est perdu à 0.
+        joueur = {"lp": max(0, lecteur.lire("i"))}
         for _ in range(7 + 8):
             if lecteur.lire("B"):
                 lecteur.lire("BI")

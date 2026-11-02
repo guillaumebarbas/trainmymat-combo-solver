@@ -2,7 +2,9 @@
 
 > **English summary.** HTTP service behind the Yu-Gi-Oh! combo simulator of [TrainMyMat](https://trainmymat.com).
 > It drives the EDOPro rules engine (ocgcore) and the Project Ignis card scripts: from a deck, a starting hand, a
-> seed and the choices already made, it replays the game and returns the legal options, the board and the events.
+> seed and the choices already made (optionally against an opponent's deck and hand, over several turns), it replays
+> the game and returns the legal options, the board and the events. It also turns the lines of a simulation tree into
+> a TrainMyMat combo graph.
 > Licensed under AGPL-3.0, like the engine and scripts it loads. Code and documentation are in French.
 
 Service FastAPI qui pilote le moteur de règles EDOPro (`ocgcore`) et les scripts de cartes Project Ignis pour
@@ -11,7 +13,8 @@ TrainMyMat.
 
 | Route | Rôle |
 |---|---|
-| `POST /simulation/etat` | Simulateur sans état : la requête porte le deck, la main de départ, la graine et les choix déjà faits ; le service rejoue la partie depuis zéro et renvoie la décision en cours (options légales, empreinte), le plateau et les événements. |
+| `POST /simulation/etat` | Simulateur sans état : la requête porte le deck, la main de départ, la graine, les choix déjà faits et, en option, les cartes de l'adversaire (`adversaire` : `deck`, `extra`, `main`), dont les décisions (`joueur: 1`) sont alors exposées elles aussi, et le nombre de tours joués (`tours`, 1 à 99, 1 par défaut ; 99 = partie complète : le début du tour `tours + 1` termine la partie) ; le service rejoue la partie depuis zéro et renvoie la décision en cours (options légales, empreinte), le plateau et les événements. Dans le plateau, les cartes de l'Extra Deck portent leur `niveau`, `rang` ou `lien` (valeur Lien) : le simulateur en déduit les matériels qui manquent pendant une Invocation Synchro, Xyz ou Lien. |
+| `POST /simulation/graphe` | Graphe de combos tiré des lignes d'un arbre de simulation : même partie que `/simulation/etat`, plus `lignes` (1 à 30 suites de `choix` nommées), `joueur` (joueur suivi : 1 quand on joue en second), `titre` et `limites` ; une branche par ligne, les débuts communs partagés, les cartes de l'autre joueur en nœuds `adverse`. Réponse `{graphe, stats}` ; 400 si une ligne ne se rejoue pas. |
 | `POST /generer` | Graphe de combos à partir d'un deck et d'une main (exploration bornée des lignes de jeu). |
 | `GET /version` | Commits du moteur, des scripts, de la base de cartes et de ce service (`service`), avec l'adresse de ce dépôt (`source`). |
 | `GET /health` | Sonde de disponibilité. |
@@ -55,6 +58,17 @@ curl -s localhost:8002/simulation/etat -H 'content-type: application/json' -H 'X
 | `COMBO_SOLVER_VERSION` | Commit déployé, renvoyé par `GET /version` (argument de build Docker) ; à défaut `SOURCE_COMMIT` (injecté au démarrage par Coolify), sinon `dev`. |
 
 Le service n'a pas vocation à être exposé sur Internet : seul le backend TrainMyMat l'appelle, avec le jeton.
+
+## Mettre à jour les cartes
+
+```bash
+./mettre_a_jour_cartes.sh             # derniers commits de CardScripts, BabelCDB et strings.conf, build, tests
+./mettre_a_jour_cartes.sh --sans-tests
+```
+
+Le script réécrit les épingles de `build_core.sh` et les commits cités par `NOTICE.md` ; le moteur `ocgcore`
+reste épinglé. Un combo enregistré avec d'anciens scripts peut ne plus se rejouer à l'identique : après le
+déploiement, revérifier les replays depuis l'admin de l'app.
 
 ## Tests
 

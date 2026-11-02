@@ -1,8 +1,10 @@
-"""Simulation interactive d'un tour : chaque décision du joueur 0 est exposée avec ses options légales.
+"""Simulation interactive : chaque décision des joueurs est exposée avec ses options légales.
 
 Le service ne garde aucune partie : chaque appel rejoue le duel depuis un état neuf à partir de la
-graine et des choix déjà faits (≈ 10 ms pour un combo complet, mesuré sur le moteur natif). Le joueur 1
-n'a aucune carte et passe toujours.
+graine et des choix déjà faits (≈ 10 ms pour un combo complet, mesuré sur le moteur natif). Sans
+adversaire, le joueur 1 n'a aucune carte et passe toujours. Avec un adversaire (deck, Extra Deck, main
+de départ), ses décisions sont exposées comme celles du joueur 0 et répondues dans la même liste de choix.
+La partie dure `tours` tours (1 par défaut) : le début du tour suivant la termine.
 """
 
 from __future__ import annotations
@@ -11,7 +13,8 @@ import hashlib
 import json
 import struct
 from collections import Counter
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass, replace
 
 from . import messages as M
@@ -20,11 +23,17 @@ from .ocg import (
     LOCATION_OVERLAY, LOCATION_REMOVED, LOCATION_SZONE, POS_FACEDOWN_ATTACK, POS_FACEDOWN_DEFENSE,
     POS_FACEUP_ATTACK, POS_FACEUP_DEFENSE, QUERY_ATTACK,
     QUERY_CODE, QUERY_COUNTERS, QUERY_DEFENSE, QUERY_LEVEL, QUERY_LINK, QUERY_OVERLAY_CARD, QUERY_OWNER,
-    QUERY_POSITION, QUERY_RANK, Engine,
+    QUERY_POSITION, QUERY_RANK, Duel, Engine,
 )
-from .simulation import reponse_automatique
+from .simulation import Simulation, marqueur, reponse_automatique
 
 MASQUE_64 = (1 << 64) - 1
+# Partie complète : le duel se termine avant (victoire, défaite, plafond de choix ou de messages). Le backend porte la
+# même borne et réserve la partie complète à une offre ; sans elle, il demande 2 tours (le sien et celui de l'adversaire).
+MAX_TOURS = 99
+# Le deck adverse est mélangé par un second générateur (graine ^ cette constante arbitraire, décimales de √2) :
+# le mélange du joueur 0 et les graines du duel restent ceux de la même graine sans adversaire.
+GRAINE_ADVERSAIRE = 0x6A09E667F3BCC908
 LIMITE_MESSAGES = 100_000  # garde-fou contre une boucle du moteur ou des réponses automatiques
 FLAGS_CARTES = (QUERY_CODE | QUERY_POSITION | QUERY_LEVEL | QUERY_RANK | QUERY_ATTACK | QUERY_DEFENSE
                 | QUERY_OVERLAY_CARD | QUERY_COUNTERS | QUERY_OWNER | QUERY_LINK)
@@ -60,11 +69,27 @@ class PartieInvalide(ValueError):
 
 
 @dataclass(frozen=True)
+class Adversaire:
+    """Cartes du joueur 1 : Main Deck (main de départ comprise), Extra Deck et main de départ."""
+    deck: tuple[int, ...] = ()
+    extra: tuple[int, ...] = ()
+    main: tuple[int, ...] = ()
+
+
+@dataclass(frozen=True)
 class PartieSimulee:
     deck: tuple[int, ...]
     extra: tuple[int, ...]
     main: tuple[int, ...]
     graine: int
+    adversaire: Adversaire | None = None
+    tours: int = 1  # tours joués : le début du tour `tours + 1` termine la simulation
+
+    @property
+    def avec_adversaire(self) -> bool:
+        """Un adversaire sans aucune carte équivaut à son absence : le joueur 1 passe toujours."""
+        adversaire = self.adversaire
+        return adversaire is not None and bool(adversaire.deck or adversaire.extra or adversaire.main)
 
 
 @dataclass(frozen=True)
@@ -146,58 +171,127 @@ class _SplitMix64:
 
 
 def valider(partie: PartieSimulee):
-    manquantes = Counter(partie.main) - Counter(partie.deck)
+    if not 1 <= partie.tours <= MAX_TOURS:
+        raise PartieInvalide(f"Le nombre de tours doit être compris entre 1 et {MAX_TOURS}.")
+    _verifier_main(partie.main, partie.deck, "Cartes de la main absentes du deck")
+    if partie.adversaire:
+        _verifier_main(partie.adversaire.main, partie.adversaire.deck,
+                       "Cartes de la main adverse absentes du deck adverse")
+
+
+def _verifier_main(main: tuple[int, ...], deck: tuple[int, ...], motif: str):
+    manquantes = Counter(main) - Counter(deck)
     if manquantes:
-        raise PartieInvalide(f"Cartes de la main absentes du deck : {sorted(manquantes)}.")
+        raise PartieInvalide(f"{motif} : {sorted(manquantes)}.")
 
 
 def preparer(partie: PartieSimulee) -> tuple[list[int], tuple[int, int, int, int]]:
     """Deck restant mélangé selon la graine (main retirée) et graines du duel."""
     valider(partie)
-    a_retirer = Counter(partie.main)
-    deck = []
-    for code in partie.deck:
+    alea = _SplitMix64(partie.graine)
+    deck = _melanger(_sans_la_main(partie.deck, partie.main), alea)
+    return deck, (alea.suivant(), alea.suivant(), alea.suivant(), alea.suivant())
+
+
+def preparer_adversaire(partie: PartieSimulee) -> list[int]:
+    """Deck restant de l'adversaire (main retirée), mélangé par son propre générateur dérivé de la graine."""
+    adversaire = partie.adversaire
+    alea = _SplitMix64(partie.graine ^ GRAINE_ADVERSAIRE)
+    return _melanger(_sans_la_main(adversaire.deck, adversaire.main), alea)
+
+
+def _sans_la_main(deck: tuple[int, ...], main: tuple[int, ...]) -> list[int]:
+    """Deck privé d'un exemplaire de chaque carte de la main de départ."""
+    a_retirer = Counter(main)
+    restant = []
+    for code in deck:
         if a_retirer[code]:
             a_retirer[code] -= 1
             continue
-        deck.append(code)
-    alea = _SplitMix64(partie.graine)
-    for i in range(len(deck) - 1, 0, -1):
+        restant.append(code)
+    return restant
+
+
+def _melanger(cartes: list[int], alea: _SplitMix64) -> list[int]:
+    """Mélange de Fisher-Yates : même générateur, même ordre."""
+    for i in range(len(cartes) - 1, 0, -1):
         j = alea.suivant() % (i + 1)
-        deck[i], deck[j] = deck[j], deck[i]
-    return deck, (alea.suivant(), alea.suivant(), alea.suivant(), alea.suivant())
+        cartes[i], cartes[j] = cartes[j], cartes[i]
+    return cartes
 
 
 def simuler(engine: Engine, partie: PartieSimulee, choix: list[Choix], evenements_depuis: int = 0) -> dict:
     """Rejoue `choix` et renvoie la décision suivante, le plateau et les événements.
 
+    `choix` répond dans l'ordre aux décisions exposées, celles du joueur 0 comme celles de l'adversaire.
     `evenements_depuis` ne garde que les événements survenus après ce nombre de choix (journal incrémental).
     """
-    deck, graines = preparer(partie)
-    duel = engine.creer_duel(graines=graines, flags=DUEL_MODE_MR5)
-    try:
-        for code in deck:
-            duel.ajouter_carte(code, 0, LOCATION_DECK)
-        for code in partie.extra:
-            duel.ajouter_carte(code, 0, LOCATION_EXTRA)
-        for code in partie.main:
-            duel.ajouter_carte(code, 0, LOCATION_HAND)
-        duel.demarrer()
-        resultat = _Rejeu(engine, duel, choix).jouer()
-    finally:
-        duel.fermer()
+    with _duel(engine, partie) as duel:
+        resultat = _Rejeu(engine, duel, choix, partie.avec_adversaire, partie.tours).jouer()
     resultat["evenements"] = [e for e in resultat["evenements"] if e["apresChoix"] >= evenements_depuis]
     return resultat
 
 
+@dataclass
+class Journal:
+    """Ligne rejouée pour en tirer un graphe, au format de `simulation.py` attendu par `graphe.extraire_actions`."""
+    resultat: dict  # comme `simuler` : statut, choixAppliques, erreur, raison…
+    evenements: list[tuple[int, M.Message]]  # (choix appliqués, message du moteur ou marqueur d'un choix)
+    reponses: list[bytes]  # réponse envoyée au moteur pour chaque choix appliqué
+    plateau: dict[int, list[tuple[int, int]]]  # (code, position) des cartes du joueur suivi, par zone, en fin de ligne
+
+
+def journaliser(engine: Engine, partie: PartieSimulee, choix: list[Choix], joueur: int = 0) -> Journal:
+    """Rejoue `choix` comme `simuler` en gardant les messages du moteur et le marqueur de chaque choix."""
+    with _duel(engine, partie) as duel:
+        rejeu = _Rejeu(engine, duel, choix, partie.avec_adversaire, partie.tours, journal=True)
+        resultat = rejeu.jouer()
+        plateau_final = {location: duel.cartes(joueur, location) for location in Simulation.LOCATIONS_PLATEAU}
+    return Journal(resultat, rejeu.journal, rejeu.reponses, plateau_final)
+
+
+@contextmanager
+def _duel(engine: Engine, partie: PartieSimulee) -> Iterator[Duel]:
+    """Duel prêt à jouer : decks mélangés selon la graine, cartes en place ; fermé à la sortie."""
+    deck, graines = preparer(partie)
+    # Sans adversaire, le joueur 1 n'a pas de deck : s'il piochait à son tour, il perdrait aussitôt (deck vide).
+    pioches = (1, 1) if partie.avec_adversaire or partie.tours == 1 else (1, 0)
+    duel = engine.creer_duel(graines=graines, flags=DUEL_MODE_MR5, pioches=pioches)
+    try:
+        _installer(duel, 0, deck, partie.extra, partie.main)
+        if partie.avec_adversaire:
+            adversaire = partie.adversaire
+            _installer(duel, 1, preparer_adversaire(partie), adversaire.extra, adversaire.main)
+        duel.demarrer()
+        yield duel
+    finally:
+        duel.fermer()
+
+
+def _installer(duel, joueur: int, deck: list[int], extra: tuple[int, ...], main: tuple[int, ...]):
+    """Place les cartes d'un joueur avant le début du duel : deck dans l'ordre donné, Extra Deck, puis main."""
+    for location, cartes in ((LOCATION_DECK, deck), (LOCATION_EXTRA, extra), (LOCATION_HAND, main)):
+        for code in cartes:
+            duel.ajouter_carte(code, joueur, location)
+
+
 class _Rejeu:
-    def __init__(self, engine: Engine, duel, choix: list[Choix]):
+    def __init__(self, engine: Engine, duel, choix: list[Choix], adversaire: bool = False, tours: int = 1,
+                 journal: bool = False):
         self.engine, self.duel, self.choix = engine, duel, choix
+        self.joueurs = (0, 1) if adversaire else (0,)  # joueurs dont les décisions sont exposées
         self.appliques = 0
         self.evenements: list[dict] = []
-        self.indice = 0  # dernier HINT_SELECTMSG du joueur 0 : texte de la prochaine sélection
+        self.indice: dict[int, int] = {}  # dernier HINT_SELECTMSG de chaque joueur : texte de sa prochaine sélection
         self.tours = 0
+        self.dernier_tour = tours  # le tour suivant termine la simulation
         self.phase: str | None = None
+        # Monstres qui pouvaient attaquer à la dernière commande de Battle Phase (contrôleur, zone) → code : l'attaque
+        # déclarée ne donne que l'emplacement de l'attaquant.
+        self.attaquants: dict[tuple[int, int], int] = {}
+        # Réponses envoyées et, sur demande, journal au format de `simulation.py` (graphe d'une ligne).
+        self.reponses: list[bytes] = []
+        self.journal: list[tuple[int, M.Message]] | None = [] if journal else None
 
     def jouer(self) -> dict:
         messages = 0
@@ -214,15 +308,19 @@ class _Rejeu:
                     continue
                 if message.type in M.DECISIONS:
                     decision = message
+                    if message.type == M.MSG_SELECT_BATTLECMD:
+                        self.attaquants = {(c.loc.controleur, c.loc.sequence): c.code for c in message.extra["attaques"]}
                     continue
+                if self.journal is not None:
+                    self.journal.append((self.appliques, message))
                 if message.type == M.MSG_NEW_TURN:
                     self.tours += 1
-                    if self.tours > 1:
+                    if self.tours > self.dernier_tour:
                         return self._resultat("fin", raison="fin-de-tour")
                 if message.type == M.MSG_WIN:
                     return self._resultat("fin", raison="victoire" if message.joueur == 0 else "defaite")
-                if message.type == M.MSG_HINT and message.extra.get("type") == M.HINT_SELECTMSG and message.joueur == 0:
-                    self.indice = message.extra["donnee"]
+                if message.type == M.MSG_HINT and message.extra.get("type") == M.HINT_SELECTMSG:
+                    self.indice[message.joueur] = message.extra["donnee"]
                 evenement = self._evenement(message)
                 if evenement:
                     self.evenements.append({**evenement, "apresChoix": self.appliques})
@@ -233,18 +331,19 @@ class _Rejeu:
                 return self._resultat("invalide", self._vue_decision(decision, vue), "Choix refusé par le moteur de règles.")
             if statut == DUEL_STATUS_END or decision is None:
                 return self._resultat("fin")
-            auto = _reponse_automatique(decision)
+            auto = _reponse_automatique(decision, self.joueurs)
             if auto is not None:
                 self.duel.repondre(auto)
                 continue
-            if decision.joueur != 0:
+            if decision.joueur not in self.joueurs:
                 return self._resultat("fin")
             try:
                 vue = decision_exposee(decision)
             except DecisionNonSupportee:
                 return self._resultat("non-supporte", erreur=f"Décision du moteur non prise en charge (message {decision.type}).")
-            if not vue.description and self.indice:
-                vue = replace(vue, description=self.indice)
+            indice = self.indice.get(decision.joueur, 0)
+            if not vue.description and indice:
+                vue = replace(vue, description=indice)
             if self.appliques < len(self.choix):
                 choix = self.choix[self.appliques]
                 if choix.empreinte and choix.empreinte != vue.empreinte():
@@ -252,10 +351,14 @@ class _Rejeu:
                 erreur = vue.erreur(choix)
                 if erreur:
                     return self._resultat("invalide", self._vue_decision(decision, vue), erreur)
-                self.duel.repondre(vue.reponse(choix))
+                reponse = vue.reponse(choix)
+                if self.journal is not None:
+                    self.journal.append((self.appliques, marqueur(decision, reponse)))
+                self.reponses.append(reponse)
+                self.duel.repondre(reponse)
                 self.repondue = (decision, vue)
                 self.appliques += 1
-                self.indice = 0
+                self.indice[decision.joueur] = 0
                 continue
             return self._resultat("decision", self._vue_decision(decision, vue))
 
@@ -340,6 +443,15 @@ class _Rejeu:
             carte = message.cartes[0]
             return {"type": "changement-position", "code": carte.code, "emplacement": emplacement(carte.loc, avec_position=True),
                     "avant": _position(message.extra["avant"])}
+        if message.type == M.MSG_ATTACK:
+            attaquant, cible = (carte.loc for carte in message.cartes)
+            evenement = {"type": "attaque", "de": emplacement(attaquant, avec_position=True), "direct": cible.location == 0}
+            code = self.attaquants.get((attaquant.controleur, attaquant.sequence))
+            if code:
+                evenement["code"] = code
+            if cible.location:
+                evenement["vers"] = emplacement(cible, avec_position=True)
+            return evenement
         return None
 
 
@@ -353,9 +465,10 @@ POINTS_DE_VIE = {M.MSG_PAY_LPCOST: "paiement-lp", M.MSG_DAMAGE: "degats", M.MSG_
 
 
 def emplacement(loc: M.Loc, avec_position: bool = False) -> dict:
-    """Emplacement d'une carte ; les événements y ajoutent sa position quand le moteur la donne."""
+    """Emplacement d'une carte ; les événements y ajoutent sa position quand le moteur la donne. Sous un Xyz, le
+    moteur range dans ce champ le rang du matériau : un matériau n'a pas de position."""
     vue = {"controleur": loc.controleur, "zone": ZONES.get(loc.location, str(loc.location)), "sequence": loc.sequence}
-    if avec_position and loc.position:
+    if avec_position and loc.position and not loc.location & LOCATION_OVERLAY:
         vue.update(_position(loc.position))
     return vue
 
@@ -406,16 +519,25 @@ def _vue_pile(carte: dict, location: int) -> dict:
     vue = {"code": carte["code"]}
     if location in (LOCATION_REMOVED, LOCATION_EXTRA):
         vue["face"] = _face(carte)
+    # Extra Deck : Niveau, Rang ou valeur Lien, ce qu'une Invocation Synchro, Xyz ou Lien du monstre doit atteindre.
+    if location == LOCATION_EXTRA:
+        for cle in ("niveau", "rang", "lien"):
+            if carte.get(cle):
+                vue[cle] = carte[cle]
     return vue
 
 
-def _reponse_automatique(decision: M.Message) -> bytes | None:
-    """Décisions répondues à la place du joueur 0 : sans choix réel, ou pas encore exposées.
+def _reponse_automatique(decision: M.Message, joueurs: tuple[int, ...] = (0,)) -> bytes | None:
+    """Décisions répondues à la place des joueurs : sans choix réel, ou pas encore exposées.
 
-    L'ordre de résolution des déclencheurs simultanés, la répartition de compteurs, le combat et
-    pierre-feuille-ciseaux reçoivent la réponse par défaut, déterministe, du POC.
+    Un joueur absent de `joueurs` (le joueur 1 sans adversaire) n'a aucune carte : la réponse par défaut
+    du POC lui fait tout passer, et il finit son tour dès qu'il en a un (partie de plusieurs tours). Pour les
+    joueurs exposés, l'ordre de résolution des déclencheurs simultanés, la répartition de compteurs, le
+    combat et pierre-feuille-ciseaux reçoivent la réponse par défaut, déterministe, du POC.
     """
-    if decision.joueur != 0:
+    if decision.joueur not in joueurs:
+        if decision.type == M.MSG_SELECT_IDLECMD:
+            return _finir_le_tour(decision)
         return reponse_automatique(decision)
     if decision.type == M.MSG_SELECT_CHAIN and not decision.cartes:
         return M.rep_i32(-1)
@@ -424,7 +546,17 @@ def _reponse_automatique(decision: M.Message) -> bytes | None:
     return None
 
 
-AUTOMATIQUES = {M.MSG_SORT_CHAIN, M.MSG_SELECT_COUNTER, M.MSG_SELECT_BATTLECMD, M.MSG_ROCK_PAPER_SCISSORS}
+# La commande de Battle Phase est exposée (décision « combat ») : elle ne reste automatique que pour un joueur absent.
+AUTOMATIQUES = {M.MSG_SORT_CHAIN, M.MSG_SELECT_COUNTER, M.MSG_ROCK_PAPER_SCISSORS}
+
+
+def _finir_le_tour(decision: M.Message) -> bytes | None:
+    """Commande principale d'un joueur sans cartes : il va en End Phase (en Battle Phase s'il ne peut pas)."""
+    if decision.extra["to_ep"]:
+        return M.rep_i32(M.IDLE_TO_EP)
+    if decision.extra["to_bp"]:
+        return M.rep_i32(M.IDLE_TO_BP)
+    return None
 
 
 def decision_exposee(d: M.Message) -> _Decision:
@@ -444,7 +576,9 @@ def decision_exposee(d: M.Message) -> _Decision:
         options = [_Option("activation", M.rep_i32(i), c.code, c.loc, c.description) for i, c in enumerate(d.cartes)]
         if not d.extra["force"]:
             options.append(_Option("passer", M.rep_i32(-1)))
-        return _Decision("chaine", options)
+        # Activations déclenchées par ce qui vient de se passer ; à 0, la fenêtre est « libre » (Magie Jeu-Rapide,
+        # Effet Rapide sans déclencheur) et EDOPro la passe par défaut. Hors empreinte : les replays restent valides.
+        return _Decision("chaine", options, infos={"speciaux": d.extra["speciaux"]})
     if d.type == M.MSG_SELECT_UNSELECT_CARD:
         return _carte_par_carte(d)
     if d.type == M.MSG_ANNOUNCE_CARD:
@@ -468,6 +602,8 @@ def decision_exposee(d: M.Message) -> _Decision:
         return _Decision("position", options)
     if d.type == M.MSG_SELECT_IDLECMD:
         return _commandes(d)
+    if d.type == M.MSG_SELECT_BATTLECMD:
+        return _combat(d)
     raise DecisionNonSupportee(d.type)
 
 
@@ -537,6 +673,19 @@ def _commandes(d: M.Message) -> _Decision:
     if d.extra["to_ep"]:
         options.append(_Option("fin-de-tour", M.rep_i32(M.IDLE_TO_EP)))
     return _Decision("commande", options)
+
+
+def _combat(d: M.Message) -> _Decision:
+    """Battle Phase : activer un effet, attaquer avec un monstre (`direct` s'il peut viser le joueur adverse), aller en
+    Main Phase 2 ou finir le tour. Réponse : (index << 16) | type, 0 activer, 1 attaquer, 2 Main Phase 2, 3 End Phase."""
+    options = [_Option("activation", M.rep_idle(0, i), c.code, c.loc, c.description) for i, c in enumerate(d.extra["activate"])]
+    options += [_Option("attaque", M.rep_idle(1, i), c.code, c.loc, details={"direct": bool(c.param)})
+                for i, c in enumerate(d.extra["attaques"])]
+    if d.extra["to_m2"]:
+        options.append(_Option("phase-principale-2", M.rep_idle(2, 0)))
+    if d.extra["to_ep"]:
+        options.append(_Option("fin-de-tour", M.rep_idle(3, 0)))
+    return _Decision("combat", options)
 
 
 def _zones(d: M.Message) -> _Decision:

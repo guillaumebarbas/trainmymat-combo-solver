@@ -8,15 +8,17 @@ import hmac
 import json
 import logging
 import os
+import time
 from threading import Lock
 from typing import Annotated
 
 from fastapi import FastAPI, Header, HTTPException
 from pydantic import BaseModel, Field, field_validator
 
+from solver.graphe_simulation import MAX_LIGNES, TITRE_PAR_DEFAUT, DemandeGraphe, LigneSimulee, graphe_des_lignes
 from solver.ocg import VENDOR, Engine
 from solver.service import RequeteInvalide, Requete, generer
-from solver.simulateur import Choix, PartieInvalide, PartieSimulee, simuler, valider
+from solver.simulateur import MAX_TOURS, Adversaire, Choix, PartieInvalide, PartieSimulee, simuler, valider
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("combo-solver")
@@ -32,9 +34,12 @@ _verrou = Lock()
 Code = Annotated[int, Field(ge=1, le=0xFFFFFFFF)]
 
 
-class LimitesDTO(BaseModel):
+class LimitesGrapheDTO(BaseModel):
     maxCartes: int = Field(25, ge=1, le=10_000)
     maxLiens: int = Field(75, ge=1, le=30_000)
+
+
+class LimitesDTO(LimitesGrapheDTO):
     maxLignes: int = Field(3, ge=1, le=30)
 
 
@@ -52,14 +57,24 @@ class ChoixDTO(BaseModel):
     empreinte: str | None = Field(None, pattern=r"^[0-9a-f]{16}$")
 
 
-class SimulationDTO(BaseModel):
+class AdversaireDTO(BaseModel):
+    """Cartes du joueur 1 ; sa main de départ fait partie de son deck."""
+    deck: list[Code] = Field(default_factory=list, max_length=60)
+    extra: list[Code] = Field(default_factory=list, max_length=15)
+    main: list[Code] = Field(default_factory=list, max_length=6)
+
+
+class PartieDTO(BaseModel):
+    """Partie rejouée par le simulateur, commune à `/simulation/etat` et `/simulation/graphe`."""
     deck: list[Code] = Field(..., min_length=1, max_length=60)
     extra: list[Code] = Field(default_factory=list, max_length=15)
     main: list[Code] = Field(..., min_length=1, max_length=6)
     # Entier 64 bits transmis en texte : JavaScript perd la précision au-delà de 2^53.
     graine: str = Field(..., pattern=r"^\d{1,20}$")
-    choix: list[ChoixDTO] = Field(default_factory=list, max_length=1500)
-    evenementsDepuis: int = Field(0, ge=0)
+    # Absent, null ou sans aucune carte : le joueur 1 passe toujours, comme avant l'ajout de ce champ.
+    adversaire: AdversaireDTO | None = None
+    # Absent ou 1 : la partie s'arrête au début du tour 2, comme avant l'ajout de ce champ.
+    tours: int = Field(1, ge=1, le=MAX_TOURS)
 
     @field_validator("graine")
     @classmethod
@@ -67,6 +82,34 @@ class SimulationDTO(BaseModel):
         if int(graine) >= 1 << 64:
             raise ValueError("La graine doit tenir sur 64 bits.")
         return graine
+
+    def partie(self) -> PartieSimulee:
+        adverse = self.adversaire
+        adversaire = Adversaire(tuple(adverse.deck), tuple(adverse.extra), tuple(adverse.main)) if adverse else None
+        return PartieSimulee(tuple(self.deck), tuple(self.extra), tuple(self.main), int(self.graine), adversaire, self.tours)
+
+
+class SimulationDTO(PartieDTO):
+    choix: list[ChoixDTO] = Field(default_factory=list, max_length=1500)
+    evenementsDepuis: int = Field(0, ge=0)
+
+
+class LigneDTO(BaseModel):
+    """Ligne d'un arbre de simulation : ses choix depuis le début de la partie, comme `SimulationDTO.choix`."""
+    nom: str = Field(..., min_length=1, max_length=20)
+    choix: list[ChoixDTO] = Field(default_factory=list, max_length=1500)
+
+
+class GrapheSimulationDTO(PartieDTO):
+    titre: str = Field(TITRE_PAR_DEFAUT, max_length=160)
+    # Joueur du moteur dont les cartes sont « à soi » dans le graphe : 1 quand l'utilisateur joue en second.
+    joueur: int = Field(0, ge=0, le=1)
+    lignes: list[LigneDTO] = Field(..., min_length=1, max_length=MAX_LIGNES)
+    limites: LimitesGrapheDTO = Field(default_factory=LimitesGrapheDTO)
+
+
+def _choix(choix: list[ChoixDTO]) -> list[Choix]:
+    return [Choix(tuple(c.indices), c.valeur, c.empreinte) for c in choix]
 
 
 def engine() -> Engine:
@@ -124,15 +167,49 @@ def generer_graphe(requete: GenerationDTO, x_solver_token: str = Header(default=
 
 @app.post("/simulation/etat")
 def etat_simulation(requete: SimulationDTO, x_solver_token: str = Header(default="")):
-    """Rejoue la partie (graine + choix) et renvoie la décision en cours, le plateau et les événements."""
+    """Rejoue la partie (graine + choix) et renvoie la décision en cours, le plateau et les événements.
+
+    Avec un adversaire, ses décisions (`joueur: 1`) sont exposées et répondues dans la même liste de choix.
+    Avec `tours: 2`, le tour adverse est joué aussi ; le début du tour `tours + 1` termine la partie.
+    """
     verifier_jeton(x_solver_token)
-    partie = PartieSimulee(tuple(requete.deck), tuple(requete.extra), tuple(requete.main), int(requete.graine))
-    choix = [Choix(tuple(c.indices), c.valeur, c.empreinte) for c in requete.choix]
+    partie = requete.partie()
     try:
         valider(partie)
+        debut = time.perf_counter()
         with _verrou:
-            resultat = simuler(engine(), partie, choix, requete.evenementsDepuis)
+            attente = time.perf_counter() - debut
+            resultat = simuler(engine(), partie, _choix(requete.choix), requete.evenementsDepuis)
+        duree = time.perf_counter() - debut
     except PartieInvalide as erreur:
         raise HTTPException(status_code=400, detail=str(erreur)) from erreur
-    logger.info("Simulation : %s choix, statut %s", resultat["choixAppliques"], resultat["statut"])
+    # Durée vue par le backend (attente comprise) : elle croît avec le nombre de choix, la partie étant rejouée en entier.
+    logger.info("Simulation : %s choix, statut %s, %d ms (attente du moteur %d ms)",
+                resultat["choixAppliques"], resultat["statut"], duree * 1000, attente * 1000)
     return {**resultat, "versions": versions()}
+
+
+@app.post("/simulation/graphe")
+def graphe_simulation(requete: GrapheSimulationDTO, x_solver_token: str = Header(default="")):
+    """Graphe TrainMyMat des lignes d'un arbre de simulation : une branche par ligne, les débuts communs partagés.
+
+    400 si une ligne ne se rejoue pas jusqu'à son dernier choix (choix refusé, empreinte divergente…).
+    """
+    verifier_jeton(x_solver_token)
+    demande = DemandeGraphe(
+        titre=requete.titre, partie=requete.partie(), joueur=requete.joueur,
+        lignes=tuple(LigneSimulee(ligne.nom, tuple(_choix(ligne.choix))) for ligne in requete.lignes),
+        max_cartes=requete.limites.maxCartes, max_liens=requete.limites.maxLiens,
+    )
+    try:
+        valider(demande.partie)
+        debut = time.perf_counter()
+        with _verrou:
+            attente = time.perf_counter() - debut
+            resultat = graphe_des_lignes(engine(), demande)
+    except PartieInvalide as erreur:
+        raise HTTPException(status_code=400, detail=str(erreur)) from erreur
+    stats = resultat["stats"]
+    logger.info("Graphe de simulation : %s lignes dessinées, %s ignorées, %ss (attente du moteur %d ms)",
+                stats["lignes"], len(stats["lignesIgnorees"]), stats["secondes"], attente * 1000)
+    return resultat

@@ -51,6 +51,7 @@ MSG_RECOVER = 92
 MSG_EQUIP = 93
 MSG_LPUPDATE = 94
 MSG_PAY_LPCOST = 100
+MSG_ATTACK = 110
 MSG_ROCK_PAPER_SCISSORS = 132
 MSG_ANNOUNCE_RACE = 140
 MSG_ANNOUNCE_ATTRIB = 141
@@ -142,7 +143,12 @@ def _new_phase(m: Message, l: Lecteur):
 
 
 def _lp(m: Message, l: Lecteur):
-    m.joueur, m.extra["montant"] = l.u8(), l.u32()
+    m.joueur = l.u8()
+    if m.type == MSG_LPUPDATE:
+        # Nouveaux LP, signés dans le moteur : sous 0 au coup fatal, le duel est perdu à 0.
+        m.extra["montant"] = max(0, l.i32())
+    else:
+        m.extra["montant"] = l.u32()
 
 
 def _win(m: Message, l: Lecteur):
@@ -163,7 +169,25 @@ def _idle(m: Message, l: Lecteur):
 
 
 def _battle(m: Message, l: Lecteur):
+    """Commande de Battle Phase : effets activables, monstres qui peuvent attaquer (et directement), M2 ou EP."""
     m.joueur = l.u8()
+    activables = []
+    for _ in range(l.u32()):
+        code, loc = l.u32(), l.loc_courte()
+        activables.append(CarteChoix(code, loc, l.u64(), l.u8()))
+    m.extra["activate"] = activables
+    # `param` : 1 quand le monstre peut attaquer directement.
+    attaquants = []
+    for _ in range(l.u32()):
+        code, controleur, location, sequence = l.u32(), l.u8(), l.u8(), l.u8()
+        attaquants.append(CarteChoix(code, Loc(controleur, location, sequence), 0, l.u8()))
+    m.extra["attaques"] = attaquants
+    m.extra["to_m2"], m.extra["to_ep"] = l.u8(), l.u8()
+
+
+def _attack(m: Message, l: Lecteur):
+    """Attaque déclarée : l'attaquant, puis sa cible (emplacement vide pour une attaque directe)."""
+    m.cartes = [CarteChoix(0, l.loc()), CarteChoix(0, l.loc())]
 
 
 def _effectyn(m: Message, l: Lecteur):
@@ -345,6 +369,7 @@ _DECODEURS = {
     MSG_LPUPDATE: _lp,
     MSG_PAY_LPCOST: _lp,
     MSG_SELECT_BATTLECMD: _battle,
+    MSG_ATTACK: _attack,
     MSG_SELECT_IDLECMD: _idle,
     MSG_SELECT_EFFECTYN: _effectyn,
     MSG_SELECT_YESNO: _yesno,

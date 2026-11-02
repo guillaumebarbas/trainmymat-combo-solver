@@ -18,6 +18,7 @@ from .simulation import SELECTIONS_CARTES, Partie, Simulation, options
 
 MAX_DECK, MAX_EXTRA, MAX_MAIN = 60, 15, 6
 PLAFOND_CARTES, PLAFOND_LIENS = 100, 300
+PLANCHER_CARTES, PLANCHER_LIENS = 8, 16
 PLAFOND_LIGNES = 5
 MAX_CANDIDATS = 5  # par choix, carte retenue comprise
 LIMITES_SUITE = Limites(max_parties=80, max_secondes=1.0, max_actions=6)
@@ -54,8 +55,8 @@ def valider(requete: Requete) -> Requete:
     return Requete(
         titre=(requete.titre or "Graphe généré").strip()[:160],
         deck=requete.deck, extra=requete.extra, main=requete.main,
-        max_cartes=max(8, min(requete.max_cartes, PLAFOND_CARTES)),
-        max_liens=max(16, min(requete.max_liens, PLAFOND_LIENS)),
+        max_cartes=max(PLANCHER_CARTES, min(requete.max_cartes, PLAFOND_CARTES)),
+        max_liens=max(PLANCHER_LIENS, min(requete.max_liens, PLAFOND_LIENS)),
         max_lignes=max(1, min(requete.max_lignes, PLAFOND_LIGNES)),
         max_parties=max(50, min(requete.max_parties, 5000)),
         max_secondes=max(1.0, min(requete.max_secondes, 45.0)),

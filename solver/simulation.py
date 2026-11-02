@@ -113,7 +113,7 @@ class Simulation:
                 return resultat  # le tour est passé : fin de la ligne
             if utilisees < len(reponses):
                 if journal:
-                    resultat.evenements.append((utilisees, _marqueur(decision, reponses[utilisees])))
+                    resultat.evenements.append((utilisees, marqueur(decision, reponses[utilisees])))
                 duel.repondre(reponses[utilisees])
                 utilisees += 1
                 continue
@@ -128,24 +128,25 @@ class Simulation:
 SELECTIONS_CARTES = (M.MSG_SELECT_CARD, M.MSG_SELECT_TRIBUTE, M.MSG_SELECT_SUM, M.MSG_SELECT_UNSELECT_CARD)
 
 
-def _marqueur(decision: M.Message, reponse: bytes) -> M.Message:
+def marqueur(decision: M.Message, reponse: bytes) -> M.Message:
     """Trace dans le journal le choix fait : commande principale ou sélection de cartes.
 
     Pour une sélection, `cartes` liste tous les candidats proposés à ce moment et
-    `extra["choisis"]` les indices retenus.
+    `extra["choisis"]` les indices retenus. Partagé avec le simulateur (`simulateur.journaliser`),
+    dont le journal alimente le même constructeur de graphe.
     """
-    marqueur = M.Message(-decision.type, decision.joueur)
+    trace = M.Message(-decision.type, decision.joueur)
     if decision.type == M.MSG_SELECT_IDLECMD:
         (valeur,) = struct.unpack("<i", reponse)
         type_, index = valeur & 0xFFFF, valeur >> 16
         groupes = ("summon", "spsummon", "repos", "mset", "sset", "activate")
         if type_ < len(groupes):
-            marqueur.cartes = [decision.extra[groupes[type_]][index]]
-        marqueur.extra["commande"] = type_
+            trace.cartes = [decision.extra[groupes[type_]][index]]
+        trace.extra["commande"] = type_
     elif decision.type in SELECTIONS_CARTES:
-        marqueur.cartes = list(decision.cartes) + list(decision.extra.get("deselection", []))
-        marqueur.extra["choisis"] = _indices_choisis(decision.type, reponse)
-    return marqueur
+        trace.cartes = list(decision.cartes) + list(decision.extra.get("deselection", []))
+        trace.extra["choisis"] = _indices_choisis(decision.type, reponse)
+    return trace
 
 
 def _indices_choisis(type_: int, reponse: bytes) -> list[int]:
