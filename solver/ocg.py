@@ -162,6 +162,11 @@ def _charger_bibliotheque() -> ctypes.CDLL:
     return lib
 
 
+def chemins_cdb(dossier: Path) -> list[Path]:
+    """Bases BabelCDB lues par le moteur, de la plus prioritaire à la moins prioritaire."""
+    return [dossier / "cards.cdb", *sorted(dossier.glob("release-*.cdb")), *sorted(dossier.glob("prerelease-*.cdb"))]
+
+
 class CardDatabase:
     """Lit les données de cartes BabelCDB et les textes d'effets (anglais).
 
@@ -170,9 +175,7 @@ class CardDatabase:
     """
 
     def __init__(self, chemins: list[Path] | None = None):
-        dossier = VENDOR / "cdb"
-        self.chemins = chemins or [dossier / "cards.cdb", *sorted(dossier.glob("release-*.cdb")),
-                                   *sorted(dossier.glob("prerelease-*.cdb"))]
+        self.chemins = chemins or chemins_cdb(VENDOR / "cdb")
         self._connexions = [sqlite3.connect(chemin, check_same_thread=False) for chemin in self.chemins]
         self._cache: dict[int, tuple | None] = {}
         self._textes: dict[int, tuple] = {}
@@ -254,11 +257,12 @@ class ScriptLibrary:
 class Engine:
     """Ressources partagées entre duels : bibliothèque native, CDB et scripts."""
 
-    def __init__(self, base: CardDatabase | None = None, scripts: ScriptLibrary | None = None):
+    def __init__(self, base: CardDatabase | None = None, scripts: ScriptLibrary | None = None,
+                 chaines: SystemStrings | None = None):
         self.lib = _charger_bibliotheque()
         self.base = base or CardDatabase()
         self.scripts = scripts or ScriptLibrary()
-        self.chaines = SystemStrings()
+        self.chaines = chaines or SystemStrings()
         self._setcodes: dict[int, ctypes.Array] = {}
         # Les callbacks doivent rester référencés tant que des duels existent.
         self._lecteur_cartes = DataReader(self._lire_carte)

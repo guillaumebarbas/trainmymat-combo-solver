@@ -58,12 +58,15 @@ Trois usages :
 
 - Ne jamais versionner `vendor/` : moteur, scripts, base de cartes et `strings.conf` sont
   récupérés par `build_core.sh` (local) ou le `Dockerfile`, aux commits épinglés dans
-  `build_core.sh`. Changer un commit change le déroulé des replays enregistrés : le faire
-  volontairement, mettre à jour `NOTICE.md`, puis revérifier les replays stockés (empreintes).
-- Nouvelles cartes : `./mettre_a_jour_cartes.sh` amène CardScripts, BabelCDB et `strings.conf`
-  sur les derniers commits de Project Ignis (épingles de `build_core.sh` et `NOTICE.md`),
-  reconstruit `vendor/` et relance les tests ; `ocgcore` reste épinglé. Après le déploiement,
-  lancer « Vérifier les replays » dans l'admin de l'app (onglet Cartes).
+  `build_core.sh` : ce sont les données de départ d'un conteneur neuf et celles des tests.
+- En service, les données de cartes suivent Project Ignis (`solver/cartes.py`, `COMBO_SOLVER_CARTES_AUTO=1` dans
+  l'image) : au démarrage, puis chaque nuit sur `POST /cartes/mettre-a-jour` appelé par le backend (3 h 30 Paris),
+  qui revérifie ensuite les replays quand les versions ont changé. Une mise à jour n'entre en service qu'après le
+  duel d'essai (`essayer_un_duel`) ; ne pas retirer ce garde-fou ni le verrou entre workers. `ocgcore` ne bouge
+  qu'avec l'image (revue à part). `GET /version` et les `versions` de chaque partie donnent les commits réellement en
+  service : ils servent à l'offre de source AGPL et sont stockés avec chaque replay.
+- `./mettre_a_jour_cartes.sh` avance les épingles de l'image (`build_core.sh`, `NOTICE.md`), reconstruit `vendor/`
+  et relance les tests ; utile pour que les tests et un conteneur neuf partent de données récentes.
 - Le contrat de sortie de `/generer` et de `/simulation/graphe` doit rester valide pour
   `BreakdownService.normaliserGraphe` : références limitées au deck (au deck adverse pour un nœud
   `adverse`), une seule entrée `PRIMARY` par action, identifiants stables et branches ≤ 100 étapes.

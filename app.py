@@ -5,28 +5,48 @@ Ce service est donc distribué sous AGPL-3.0, comme draw2-service.
 """
 
 import hmac
-import json
 import logging
 import os
 import time
-from threading import Lock
+from contextlib import asynccontextmanager
+from threading import Lock, Thread
 from typing import Annotated
 
 from fastapi import FastAPI, Header, HTTPException
 from pydantic import BaseModel, Field, field_validator
 
+from solver.cartes import Donnees, MiseAJourImpossible, donnees_du_service
 from solver.graphe_simulation import MAX_LIGNES, TITRE_PAR_DEFAUT, DemandeGraphe, LigneSimulee, graphe_des_lignes
-from solver.ocg import VENDOR, Engine
+from solver.ocg import Engine
 from solver.service import RequeteInvalide, Requete, generer
 from solver.simulateur import MAX_TOURS, Adversaire, Choix, PartieInvalide, PartieSimulee, simuler, valider
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("combo-solver")
 
-app = FastAPI(title="TrainMyMat Combo Solver")
+
+@asynccontextmanager
+async def cycle_de_vie(_app: FastAPI):
+    # Un conteneur neuf démarre sur les données de l'image : il rattrape Project Ignis sans attendre la nuit.
+    if os.environ.get("COMBO_SOLVER_CARTES_AUTO") == "1":
+        Thread(target=_mettre_a_jour_les_cartes_au_demarrage, name="cartes-au-demarrage", daemon=True).start()
+    yield
+
+
+def _mettre_a_jour_les_cartes_au_demarrage():
+    try:
+        mettre_a_jour_les_cartes()
+    except MiseAJourImpossible:
+        pass  # déjà journalisé ; le service tourne sur les données de l'image
+    except Exception:
+        logger.exception("Données de cartes : mise à jour du démarrage interrompue")
+
+
+app = FastAPI(title="TrainMyMat Combo Solver", lifespan=cycle_de_vie)
 TOKEN = os.environ.get("COMBO_SOLVER_TOKEN", "")
 SOURCE = "https://github.com/guillaumebarbas/trainmymat-combo-solver"
-_engine: Engine | None = None
+DONNEES = donnees_du_service()
+_moteur: tuple[Donnees, Engine] | None = None
 # Le moteur et ses callbacks ctypes ne sont pas prévus pour un usage concurrent : un moteur par processus
 # (plusieurs workers uvicorn pour servir en parallèle).
 _verrou = Lock()
@@ -113,10 +133,17 @@ def _choix(choix: list[ChoixDTO]) -> list[Choix]:
 
 
 def engine() -> Engine:
-    global _engine
-    if _engine is None:
-        _engine = Engine()
-    return _engine
+    """Moteur du processus, reconstruit quand d'autres données de cartes passent en service (autre worker compris)."""
+    global _moteur
+    donnees = DONNEES.actives()
+    if _moteur is None or _moteur[0] != donnees:
+        _moteur = (donnees, donnees.moteur())
+    return _moteur[1]
+
+
+def donnees_du_moteur() -> Donnees | None:
+    """Données du moteur de ce processus : celles de la partie qui vient d'être jouée sous `_verrou`."""
+    return _moteur[0] if _moteur else None
 
 
 def verifier_jeton(jeton: str):
@@ -126,17 +153,34 @@ def verifier_jeton(jeton: str):
         raise HTTPException(status_code=401, detail="Jeton invalide.")
 
 
-def versions() -> dict:
-    """Commits du moteur et des données (écrits par build_core.sh), à stocker avec chaque replay.
+def versions(donnees: Donnees | None = None) -> dict:
+    """Commits du moteur (image) et des données de cartes en service, à stocker avec chaque replay.
 
     `source` + `service` forment l'offre de code source AGPL affichée par l'application : un fork déployé
     doit faire pointer `SOURCE` vers son propre dépôt. Sans COMBO_SOLVER_VERSION au build, le commit vient de
-    SOURCE_COMMIT, injecté au démarrage par Coolify.
+    SOURCE_COMMIT, injecté au démarrage par Coolify. Les données de cartes sont celles de Project Ignis à ces commits.
     """
-    fichier = VENDOR / "versions.json"
-    epinglees = json.loads(fichier.read_text()) if fichier.is_file() else {}
     service = os.environ.get("COMBO_SOLVER_VERSION") or os.environ.get("SOURCE_COMMIT") or "dev"
-    return {**epinglees, "service": service, "source": SOURCE}
+    return {**DONNEES.versions(donnees), "service": service, "source": SOURCE}
+
+
+def mettre_a_jour_les_cartes() -> dict:
+    """Met les données de cartes sur les derniers commits de Project Ignis ; journalise le bilan."""
+    debut = time.perf_counter()
+    try:
+        resultat = DONNEES.mettre_a_jour(verrou_moteur=_verrou)
+    except MiseAJourImpossible as erreur:
+        logger.error("Données de cartes : mise à jour impossible, données en service gardées (%s)", erreur)
+        raise
+    secondes = round(time.perf_counter() - debut, 1)
+    if resultat["statut"] == "mise-a-jour":
+        apres = versions()
+        changes = ", ".join(f"{cle} {resultat['avant'].get(cle, '?')[:10]} → {apres[cle][:10]}"
+                            for cle in ("scripts", "cartes", "chaines") if resultat["avant"].get(cle) != apres[cle])
+        logger.info("Données de cartes mises à jour : %s (%s s)", changes, secondes)
+    else:
+        logger.info("Données de cartes : %s (%s s)", resultat["statut"], secondes)
+    return {**resultat, "secondes": secondes}
 
 
 @app.get("/health")
@@ -147,6 +191,24 @@ def health():
 @app.get("/version")
 def version():
     return versions()
+
+
+@app.post("/cartes/mettre-a-jour")
+def mettre_a_jour_cartes(x_solver_token: str = Header(default="")):
+    """Amène les données de cartes sur les derniers commits de Project Ignis (appelé chaque nuit par le backend).
+
+    `statut` : `a-jour`, `mise-a-jour` (avec `avant`), `en-cours` (un autre worker s'en charge) ou `desactivee`
+    (COMBO_SOLVER_CARTES_AUTO≠1 : le service garde les données de l'image). 502 si les dépôts sont injoignables ou si
+    les nouvelles données ratent le duel d'essai : les données en service restent les mêmes.
+    """
+    verifier_jeton(x_solver_token)
+    if os.environ.get("COMBO_SOLVER_CARTES_AUTO") != "1":
+        return {"statut": "desactivee", "versions": versions()}
+    try:
+        resultat = mettre_a_jour_les_cartes()
+    except MiseAJourImpossible as erreur:
+        raise HTTPException(status_code=502, detail=str(erreur)) from erreur
+    return {**resultat, "versions": versions()}
 
 
 @app.post("/generer")
@@ -180,13 +242,15 @@ def etat_simulation(requete: SimulationDTO, x_solver_token: str = Header(default
         with _verrou:
             attente = time.perf_counter() - debut
             resultat = simuler(engine(), partie, _choix(requete.choix), requete.evenementsDepuis)
+            # Versions des données qui ont joué cette partie, même si d'autres passent en service juste après.
+            donnees = donnees_du_moteur()
         duree = time.perf_counter() - debut
     except PartieInvalide as erreur:
         raise HTTPException(status_code=400, detail=str(erreur)) from erreur
     # Durée vue par le backend (attente comprise) : elle croît avec le nombre de choix, la partie étant rejouée en entier.
     logger.info("Simulation : %s choix, statut %s, %d ms (attente du moteur %d ms)",
                 resultat["choixAppliques"], resultat["statut"], duree * 1000, attente * 1000)
-    return {**resultat, "versions": versions()}
+    return {**resultat, "versions": versions(donnees)}
 
 
 @app.post("/simulation/graphe")

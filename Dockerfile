@@ -13,6 +13,10 @@ COPY build_core.sh .
 RUN ./build_core.sh \
     && rm -rf vendor/build vendor/ocgcore/.git vendor/scripts/.git vendor/cdb/.git
 
+# Données de cartes tenues à jour depuis Project Ignis à l'exécution (solver/cartes.py) : au démarrage, puis chaque
+# nuit à l'appel du backend (POST /cartes/mettre-a-jour). 0 : le service garde les données épinglées ci-dessus.
+ENV COMBO_SOLVER_CARTES_AUTO=1
+
 COPY solver ./solver
 COPY app.py LICENSE NOTICE.md ./
 

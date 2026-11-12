@@ -1,6 +1,8 @@
+import json
 import logging
 import re
 import sys
+import threading
 from pathlib import Path
 
 import pytest
@@ -214,3 +216,117 @@ def test_graphe_de_simulation_refuse_une_ligne_qui_ne_se_rejoue_pas(client):
 
     assert reponse.status_code == 400
     assert reponse.json()["detail"].startswith("Ligne « B », choix n° 1 : ")
+
+
+# --- Données de cartes tenues à jour depuis Project Ignis -------------------------------------------------------------
+
+from solver.cartes import Donnees, DonneesCartes  # noqa: E402
+
+ANCIENNES = {"scripts": "a" * 40, "cartes": "b" * 40, "chaines": "c" * 40}
+NOUVELLES = {"scripts": "d" * 40, "cartes": "e" * 40, "chaines": "f" * 40}
+
+
+def donnees_de_test(tmp_path, derniers=NOUVELLES, essayer=lambda nouvelles, actives: None) -> DonneesCartes:
+    vendor = tmp_path / "vendor"
+    vendor.mkdir()
+    (vendor / "versions.json").write_text(json.dumps({"ocgcore": "0" * 40, **ANCIENNES}))
+
+    def telecharger(commits, dossier):
+        (dossier / "strings.conf").write_text("")
+
+    return DonneesCartes(vendor, tmp_path / "maj", derniers_commits=lambda: derniers, telecharger=telecharger,
+                         essayer=essayer)
+
+
+@pytest.fixture
+def donnees(tmp_path, monkeypatch):
+    donnees = donnees_de_test(tmp_path)
+    monkeypatch.setattr(service, "DONNEES", donnees)
+    return donnees
+
+
+def test_version_donne_les_commits_des_donnees_en_service(client, donnees):
+    assert client.get("/version").json()["scripts"] == ANCIENNES["scripts"]
+
+    donnees.mettre_a_jour()
+
+    versions = client.get("/version").json()
+    assert {cle: versions[cle] for cle in NOUVELLES} == NOUVELLES
+    assert versions["ocgcore"] == "0" * 40
+
+
+def test_la_mise_a_jour_des_cartes_exige_le_jeton(client, donnees, monkeypatch):
+    assert client.post("/cartes/mettre-a-jour", headers={"X-Solver-Token": "faux"}).status_code == 401
+    monkeypatch.setattr(service, "TOKEN", "")
+    assert client.post("/cartes/mettre-a-jour").status_code == 503
+    assert donnees.actives() == donnees.image
+
+
+def test_sans_mise_a_jour_automatique_le_service_garde_les_donnees_de_l_image(client, donnees, monkeypatch):
+    monkeypatch.setenv("COMBO_SOLVER_CARTES_AUTO", "0")
+
+    reponse = client.post("/cartes/mettre-a-jour", headers=JETON)
+
+    assert reponse.status_code == 200
+    assert reponse.json()["statut"] == "desactivee"
+    assert reponse.json()["versions"]["scripts"] == ANCIENNES["scripts"]
+    assert donnees.actives() == donnees.image
+
+
+def test_la_mise_a_jour_des_cartes_renvoie_les_versions_avant_et_apres(client, donnees, monkeypatch):
+    monkeypatch.setenv("COMBO_SOLVER_CARTES_AUTO", "1")
+
+    reponse = client.post("/cartes/mettre-a-jour", headers=JETON)
+
+    assert reponse.status_code == 200
+    corps = reponse.json()
+    assert corps["statut"] == "mise-a-jour"
+    assert corps["avant"]["scripts"] == ANCIENNES["scripts"]
+    assert corps["versions"]["scripts"] == NOUVELLES["scripts"]
+    assert corps["versions"]["source"] == service.SOURCE
+    assert corps["secondes"] >= 0
+    assert client.post("/cartes/mettre-a-jour", headers=JETON).json()["statut"] == "a-jour"
+
+
+def test_une_mise_a_jour_impossible_renvoie_502_et_garde_les_donnees(client, tmp_path, monkeypatch):
+    def essayer(nouvelles, actives):
+        raise RuntimeError("Duel d'essai raté")
+
+    monkeypatch.setattr(service, "DONNEES", donnees_de_test(tmp_path, essayer=essayer))
+    monkeypatch.setenv("COMBO_SOLVER_CARTES_AUTO", "1")
+
+    reponse = client.post("/cartes/mettre-a-jour", headers=JETON)
+
+    assert reponse.status_code == 502 and "Duel d'essai raté" in reponse.json()["detail"]
+    assert client.get("/version").json()["scripts"] == ANCIENNES["scripts"]
+
+
+def test_le_moteur_se_recharge_quand_d_autres_donnees_passent_en_service(donnees, monkeypatch):
+    monkeypatch.setattr(service, "_moteur", None)
+    monkeypatch.setattr(Donnees, "moteur", lambda self: object())
+
+    premier = service.engine()
+    assert service.engine() is premier
+
+    donnees.mettre_a_jour()
+
+    assert service.engine() is not premier
+
+
+def test_au_demarrage_le_service_met_ses_cartes_a_jour_si_c_est_active(monkeypatch):
+    appels = threading.Event()
+
+    class Donnees_:
+        def mettre_a_jour(self, verrou_moteur=None):
+            appels.set()
+            return {"statut": "a-jour"}
+
+    monkeypatch.setattr(service, "DONNEES", Donnees_())
+    monkeypatch.setenv("COMBO_SOLVER_CARTES_AUTO", "0")
+    with TestClient(service.app):
+        pass
+    assert not appels.wait(0.2)
+
+    monkeypatch.setenv("COMBO_SOLVER_CARTES_AUTO", "1")
+    with TestClient(service.app):
+        assert appels.wait(5)

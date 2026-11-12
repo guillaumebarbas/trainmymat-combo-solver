@@ -6,7 +6,7 @@ moteur de règles et les scripts de cartes ci-dessous, eux-mêmes sous AGPL : to
 ce service à travers le réseau, y compris via l'application TrainMyMat, peut en obtenir le code source
 complet, modifications comprises, pour la version qu'elle utilise : il est publié sur
 <https://github.com/guillaumebarbas/trainmymat-combo-solver>, et `GET /version` donne le commit déployé
-(`service`) ainsi que ceux du moteur et des données.
+(`service`) ainsi que ceux du moteur et des données en service.
 
 L'application et le backend TrainMyMat sont des programmes distincts qui dialoguent avec ce service
 uniquement par HTTP/JSON ; ils ne sont pas couverts par cette notice.
@@ -24,4 +24,7 @@ approuvé par Konami. Les noms, textes et illustrations des cartes appartiennent
 | [ProjectIgnis/BabelCDB](https://github.com/ProjectIgnis/BabelCDB) | caractéristiques et textes des cartes | aucune licence déclarée | `fdf92aea31033cd6c44afa89987c5e00665205e2` |
 | [ProjectIgnis/Distribution](https://github.com/ProjectIgnis/Distribution) (`config/strings.conf`) | textes système (invites, zones, Attributs, Types) | voir le dépôt | `54a6e2395c532648ff762540e9615319fac4f51b` |
 
-Aucun de ces composants n'est modifié : ils sont récupérés tels quels aux commits ci-dessus.
+Aucun de ces composants n'est modifié : ils sont récupérés tels quels. L'image Docker embarque les commits
+ci-dessus ; quand la mise à jour automatique est active (`COMBO_SOLVER_CARTES_AUTO=1`), CardScripts, BabelCDB et
+`strings.conf` sont ensuite repris aux derniers commits publics de Project Ignis, et `GET /version` donne ceux
+en service.

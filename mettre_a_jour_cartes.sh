@@ -74,10 +74,10 @@ fi
 
 cat <<'SUITE'
 
-Données de cartes à jour en local. Pour la prod :
+Données de cartes de l'image à jour en local. La prod n'en a pas besoin pour suivre Project Ignis
+(COMBO_SOLVER_CARTES_AUTO=1 : mise à jour au démarrage et chaque nuit) ; ces épingles sont le point de départ
+d'un conteneur neuf et les données des tests. Pour les publier :
   1. committer build_core.sh et NOTICE.md ;
   2. pousser le dépôt public trainmymat-combo-solver (offre de source AGPL, voir AGENTS.md) ;
-  3. redéployer l'application combo-solver dans Coolify (l'image reconstruit vendor/ avec ces épingles) ;
-  4. dans l'admin de l'app, onglet Cartes, lancer « Vérifier les replays » : un combo enregistré avec les anciens
-     scripts peut ne plus se rejouer à l'identique.
+  3. redéployer l'application combo-solver dans Coolify.
 SUITE
